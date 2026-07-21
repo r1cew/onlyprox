@@ -1,0 +1,141 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayConfig {
+    pub dns: serde_json::Value,
+    pub inbounds: Vec<serde_json::Value>,
+    pub log: serde_json::Value,
+    pub outbounds: Vec<serde_json::Value>,
+    pub routing: serde_json::Value,
+}
+
+impl XrayConfig {
+    /// Создает базовый рабочий конфиг Xray со вставленным outbound
+    pub fn new_with_proxy(outbound_proxy: serde_json::Value, socks_port: u16) -> Self {
+        Self {
+            log: serde_json::json!({ "loglevel": "warning" }),
+            dns: serde_json::json!({
+                "hosts": { "dns.google": ["8.8.8.8"] },
+                "servers": ["1.1.1.1", "8.8.8.8", "https://dns.google/dns-query"]
+            }),
+            inbounds: vec![serde_json::json!({
+                "tag": "socks",
+                "listen": "127.0.0.1",
+                "port": socks_port,
+                "protocol": "mixed",
+                "sniffing": {
+                    "enabled": true,
+                    "destOverride": ["http", "tls"],
+                    "routeOnly": false
+                },
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "allowTransparent": false
+                }
+            })],
+            outbounds: vec![
+                outbound_proxy,
+                serde_json::json!({ "tag": "direct", "protocol": "freedom" }),
+                serde_json::json!({ "tag": "block", "protocol": "blackhole" }),
+            ],
+            routing: serde_json::json!({
+                "domainStrategy": "AsIs",
+                "rules": [
+                    {
+                        "type": "field",
+                        "port": "0-65535",
+                        "outboundTag": "proxy"
+                    }
+                ]
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ProxyLink {
+    Vless(VlessData),
+    Vmess(VmessData),
+    Trojan(TrojanData),
+    Shadowsocks(SsData),
+}
+
+impl ProxyLink {
+    pub fn remark(&self) -> &str {
+        match self {
+            ProxyLink::Vless(d) => &d.remark,
+            ProxyLink::Vmess(d) => &d.remark,
+            ProxyLink::Trojan(d) => &d.remark,
+            ProxyLink::Shadowsocks(d) => &d.remark,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VlessData {
+    pub uuid: String,
+    pub address: String,
+    pub port: u16,
+    pub params: HashMap<String, String>,
+    pub remark: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VmessData {
+    pub remark: String,
+    pub address: String,
+    pub port: u16,
+    pub uuid: String,
+    pub security: String,
+    pub network: String,
+    pub path: Option<String>,
+    pub host: Option<String>,
+    pub tls: Option<String>,
+    pub sni: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrojanData {
+    pub password: String,
+    pub address: String,
+    pub port: u16,
+    pub params: HashMap<String, String>,
+    pub remark: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsData {
+    pub method: String,
+    pub password: String,
+    pub address: String,
+    pub port: u16,
+    pub remark: String,
+}
+
+#[derive(Debug)]
+pub struct CheckResult {
+    pub config_id: String,
+    pub remark: String,
+    pub is_working: bool,
+    pub latency_ms: u128,
+}
+
+#[derive(Clone, Debug)]
+pub struct TestStage {
+    pub name: String,
+    pub speedtest: bool,
+    pub min_speed_kbps: f64, // Минимальная скорость в КБ/с
+    pub threads: usize,      // Кол-во параллельных потоков
+    pub repeats: usize,      // Сколько раз перепроверять
+    pub interval_sec: u64,   // Задержка между повторами
+}
+
+// Результат прохождения этапа
+pub struct ProxyCandidate {
+    pub id: String,
+    pub link: ProxyLink,
+    pub last_latency: u128,
+    pub last_speed_kbps: f64,
+}

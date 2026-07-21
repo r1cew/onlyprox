@@ -1,0 +1,14 @@
+[package]
+name = "onlyprox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = { version = "0.13", features = ["json"] }
+tokio = { version = "1", features = ["full"] }  
+
+url = "2.5.8"
+base64 = "0.22.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3.33"
