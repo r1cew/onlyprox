@@ -1,80 +1,123 @@
 use crate::builder::build_outbound_from_link;
-use crate::models::{CheckResult, ProxyLink, XrayConfig};
+use crate::models::*;
 use reqwest::Client;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::{mpsc, Semaphore};
-use tokio::time::{timeout, Instant};
-use futures_util::StreamExt; // Убедитесь, что эта зависимость есть (обычно идет с reqwest/tokio)
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, timeout, Instant};
+use futures_util::StreamExt;
 
-pub struct ConfigChecker {
-    concurrency_limit: Arc<Semaphore>,
-    timeout_duration: Duration,
+fn get_free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|addr| addr.port())
+        .unwrap_or(10808)
 }
 
-impl ConfigChecker {
-    pub fn new(max_concurrent: usize, timeout_secs: u64) -> Self {
-        Self {
-            concurrency_limit: Arc::new(Semaphore::new(max_concurrent)),
-            timeout_duration: Duration::from_secs(timeout_secs),
-        }
-    }
+pub async fn test_http_ping(socks_port: u16, timeout_dur: Duration) -> bool {
+    let proxy_url = format!("http://127.0.0.1:{}", socks_port);
 
-    pub async fn check_all(&self, links: Vec<ProxyLink>) -> Vec<CheckResult> {
-        let (tx, mut rx) = mpsc::channel(links.len().max(1));
+    let client = match Client::builder()
+        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
+        .timeout(timeout_dur)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
 
-        for (i, link) in links.into_iter().enumerate() {
-            let sem = Arc::clone(&self.concurrency_limit);
-            let tx = tx.clone();
-            let timeout_dur = self.timeout_duration;
-            let id = format!("cfg_{}", i + 1);
-
-            tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let result = check_single_link(&id, &link, timeout_dur).await;
-                let _ = tx.send(result).await;
-            });
-        }
-
-        drop(tx); // Закрываем исходный отправщик, чтобы rx смог завершиться
-
-        let mut results = Vec::new();
-        while let Some(res) = rx.recv().await {
-            results.push(res);
-        }
-
-        results
+    match timeout(
+        timeout_dur,
+        client.get("http://www.gstatic.com/generate_204").send(),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp.status().is_success(),
+        _ => false,
     }
 }
 
-async fn check_single_link(id: &str, link: &ProxyLink, timeout_dur: Duration) -> CheckResult {
+pub async fn measure_speed_kbps(socks_port: u16, timeout_dur: Duration, min_speed_kbps: f64) -> Option<f64> {
+    let proxy_url = format!("http://127.0.0.1:{}", socks_port);
+
+    let client = Client::builder()
+        .proxy(reqwest::Proxy::all(&proxy_url).ok()?)
+        .timeout(timeout_dur)
+        .build()
+        .ok()?;
+    
+    let test_url = if min_speed_kbps >= 100.0 {"http://cachefly.cachefly.net/1mb.test"} else {"http://cachefly.cachefly.net/5mb.test"};
+    
+    let response = timeout(timeout_dur, client.get(test_url).send()).await.ok()?.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    // Засекаем время ТОЛЬКО когда сервер начал отдавать данные
+    let download_start = Instant::now();
+    let mut downloaded_bytes = 0;
+    let mut stream = response.bytes_stream();
+
+    // Читаем поток байт
+    while let Ok(Some(chunk_result)) = timeout(timeout_dur, stream.next()).await {
+        if let Ok(chunk) = chunk_result {
+            downloaded_bytes += chunk.len();
+        } else {
+            break;
+        }
+    }
+
+    let duration_secs = download_start.elapsed().as_secs_f64();
+
+    if duration_secs > 0.1 && downloaded_bytes > 0 {
+        let speed_kbps = (downloaded_bytes as f64 / 1024.0) / duration_secs;
+        Some(speed_kbps)
+    } else {
+        None
+    }
+}
+
+fn link_to_config(candidate: &ProxyCandidate, port: u16) {
+    let outbound = build_outbound_from_link(&candidate.link);
+    XrayConfig::new_with_proxy(outbound, port);
+}
+
+pub async fn check_single_candidate(
+    candidate: &ProxyCandidate,
+    need_speedtest: bool,
+    min_speed_kbps: f64
+) -> CheckResult {
     let test_socks_port = get_free_port();
 
-    let outbound = build_outbound_from_link(link);
-    let xray_config = XrayConfig::new_with_proxy(outbound, test_socks_port);
+    let xray_config = link_to_config(candidate,test_socks_port);
+
     let config_json = match serde_json::to_string(&xray_config) {
         Ok(j) => j,
         Err(_) => {
             return CheckResult {
-                config_id: id.to_string(),
-                remark: link.remark().to_string(),
                 is_working: false,
                 latency_ms: 0,
+                speed_kbps: 0.0,
             }
         }
     };
 
-    let temp_config_path = format!("C:\\Users\\r1ceb\\Desktop\\onlyprox\\tmp\\xray_check_{}_{}.json", id, test_socks_port);
+    let temp_config_path = format!(
+        "C:\\Users\\r1ceb\\Desktop\\onlyprox\\tmp\\xray_check_{}_{}.json",
+        candidate.id, test_socks_port
+    );
     let _ = tokio::fs::create_dir_all("C:\\Users\\r1ceb\\Desktop\\onlyprox\\tmp").await;
-    
-    if tokio::fs::write(&temp_config_path, config_json).await.is_err() {
+
+    if tokio::fs::write(&temp_config_path, config_json)
+        .await
+        .is_err()
+    {
         return CheckResult {
-            config_id: id.to_string(),
-            remark: link.remark().to_string(),
             is_working: false,
             latency_ms: 0,
+            speed_kbps: 0.0,
         };
     }
 
@@ -90,110 +133,144 @@ async fn check_single_link(id: &str, link: &ProxyLink, timeout_dur: Duration) ->
         Err(_) => {
             let _ = tokio::fs::remove_file(&temp_config_path).await;
             return CheckResult {
-                config_id: id.to_string(),
-                remark: link.remark().to_string(),
                 is_working: false,
                 latency_ms: 0,
+                speed_kbps: 0.0,
             };
         }
     };
 
-    // Увеличенная пауза для стабильного старта TLS / Reality соединений (500мс)
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(300)).await;
 
-    let start_time = std::time::Instant::now();
-    // Используем gstatic для проверки
-    let is_working = test_http_ping(test_socks_port, timeout_dur).await;
+    let start_time = Instant::now();
+    let is_ping_ok = test_http_ping(test_socks_port, Duration::from_secs(4)).await;
     let latency_ms = start_time.elapsed().as_millis();
 
+    let mut speed_kbps = 0.0;
+    let mut is_working = false;
+
+    if is_ping_ok {
+        if need_speedtest {
+            if let Some(speed) = measure_speed_kbps(test_socks_port, Duration::from_secs(8), min_speed_kbps).await
+            {
+                speed_kbps = speed;
+                is_working = true;
+            }
+        } else {
+            is_working = true;
+        }
+    }
     let _ = child.kill().await;
     let _ = tokio::fs::remove_file(&temp_config_path).await;
 
     CheckResult {
-        config_id: id.to_string(),
-        remark: link.remark().to_string(),
         is_working,
         latency_ms,
+        speed_kbps,
     }
 }
 
-async fn test_http_ping(socks_port: u16, timeout_dur: Duration) -> bool {
-    let proxy_url = format!("http://127.0.0.1:{}", socks_port);
+pub async fn run_pipeline(
+    initial_links: Vec<ProxyLink>,
+    stages: Vec<TestStage>,
+) -> Vec<ProxyCandidate> {
+    let mut candidates: Vec<ProxyCandidate> = initial_links
+        .into_iter()
+        .enumerate()
+        .map(|(i, link)| ProxyCandidate {
+            id: format!("cfg_{}", i + 1),
+            link,
+            last_latency: 0,
+            last_speed_kbps: 0.0,
+        })
+        .collect();
 
-    let client = match Client::builder()
-        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
-        .timeout(timeout_dur)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    println!("🚀 СТАРТ ВОРОНКИ ПРОВЕРКИ. Всего кандидатов: {}\n", candidates.len());
 
-    // Меняем endpoint проверки на более надежный
-    match timeout(
-        timeout_dur,
-        client.get("    ").send(),
-    )
-    .await
-    {
-        Ok(Ok(resp)) => resp.status().is_success(),
-        _ => false,
+    for (stage_idx, stage) in stages.iter().enumerate() {
+        if candidates.is_empty() {
+            println!("⚠️ Все конфиги отсеялись. Проверка завершена.");
+            break;
+        }
+
+        println!(
+            "==================================================\n\
+             🔹 ЭТАП {}/{}: {}\n\
+             На входе: {} | Потоков: {} | Повторов: {} | Мин.Скорость: {} КБ/с\n\
+             ==================================================",
+            stage_idx + 1,
+            stages.len(),
+            stage.name,
+            candidates.len(),
+            stage.threads,
+            stage.repeats,
+            stage.min_speed_kbps
+        );
+
+        let semaphore = Arc::new(Semaphore::new(stage.threads));
+        let mut tasks = vec![];
+
+        for candidate in candidates {
+            let sem = Arc::clone(&semaphore);
+            let stage_info = stage.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                let mut passed_all_repeats = true;
+                let mut total_speed = 0.0;
+                let mut total_latency = 0;
+
+                for r in 0..stage_info.repeats {
+                    if r > 0 && stage_info.interval_sec > 0 {
+                        sleep(Duration::from_secs(stage_info.interval_sec)).await;
+                    }
+
+                    let res = check_single_candidate(&candidate, stage_info.speedtest, stage_info.min_speed_kbps).await;
+
+                    if !res.is_working || res.speed_kbps < stage_info.min_speed_kbps {
+                        passed_all_repeats = false;
+                        break;
+                    }
+
+                    total_speed += res.speed_kbps;
+                    total_latency += res.latency_ms;
+                }
+
+                if passed_all_repeats {
+                    let avg_speed = total_speed / (stage_info.repeats as f64);
+                    let avg_latency = total_latency / (stage_info.repeats as u128);
+
+                    Some(ProxyCandidate {
+                        id: candidate.id,
+                        link: candidate.link,
+                        last_latency: avg_latency,
+                        last_speed_kbps: avg_speed,
+                    })
+                } else {
+                    None
+                }
+            }));
+        }
+
+        let mut next_stage_candidates = Vec::new();
+        for task in tasks {
+            if let Ok(Some(survived)) = task.await {
+                println!(
+                    "  [✓] [{}] {} | {} ms | {:.1} KB/s",
+                    survived.id,
+                    survived.link.remark(),
+                    survived.last_latency,
+                    survived.last_speed_kbps
+                );
+                next_stage_candidates.push(survived);
+            }
+        }
+
+        candidates = next_stage_candidates;
+        println!("\nВыжило на этапе '{}': {}\n", stage.name, candidates.len());
     }
-}
 
-
-async fn measure_speed_and_ping(proxy_port: u16, timeout_dur: Duration) -> (bool, u128, f64) {
-    let proxy_url = format!("http://127.0.0.1:{}", proxy_port);
-
-    let client = match Client::builder()
-        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
-        .timeout(timeout_dur)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (false, 0, 0.0),
-    };
-
-    // Используем небольшой файл на 1 МБ для быстрого замера скорости
-    let test_url = "https://speedtest.selectel.ru/10MB";
-
-    let start_time = Instant::now();
-    let download_start = Instant::now();
-
-    // Скачиваем файл с общим таймаутом
-    let response = match timeout(timeout_dur, client.get(test_url).send()).await {
-        Ok(Ok(resp)) if resp.status().is_success() => resp,
-        _ => return (false, 0, 0.0),
-    };
-
-    let latency_ms = start_time.elapsed().as_millis();
-
-    // Получаем байты целиком (для 1МБ это мгновенно и безопасно для памяти)
-    let bytes = match timeout(timeout_dur, response.bytes()).await {
-        Ok(Ok(b)) => b,
-        _ => return (false, latency_ms, 0.0),
-    };
-
-    let duration_secs = download_start.elapsed().as_secs_f64();
-    let downloaded_bytes = bytes.len();
-
-    // Считаем скорость в Мбит/с (Megabits per second)
-    let speed_mbps = if duration_secs > 0.0 {
-        let bits = (downloaded_bytes as f64) * 8.0;
-        (bits / duration_secs) / 1_000_000.0
-    } else {
-        0.0
-    };
-
-    let is_working = downloaded_bytes > 0;
-
-    (is_working, latency_ms, speed_mbps)
-}
-
-
-fn get_free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|addr| addr.port())
-        .unwrap_or(10808)
+    println!("🎉 ВОРОНКА ЗАВЕРШЕНА! Итого отборных конфигов: {}", candidates.len());
+    candidates
 }

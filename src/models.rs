@@ -11,7 +11,6 @@ pub struct XrayConfig {
 }
 
 impl XrayConfig {
-    /// Создает базовый рабочий конфиг Xray со вставленным outbound
     pub fn new_with_proxy(outbound_proxy: serde_json::Value, socks_port: u16) -> Self {
         Self {
             log: serde_json::json!({ "loglevel": "warning" }),
@@ -114,28 +113,27 @@ pub struct SsData {
     pub remark: String,
 }
 
-#[derive(Debug)]
-pub struct CheckResult {
-    pub config_id: String,
-    pub remark: String,
-    pub is_working: bool,
-    pub latency_ms: u128,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestStage {
     pub name: String,
     pub speedtest: bool,
-    pub min_speed_kbps: f64, // Минимальная скорость в КБ/с
-    pub threads: usize,      // Кол-во параллельных потоков
-    pub repeats: usize,      // Сколько раз перепроверять
-    pub interval_sec: u64,   // Задержка между повторами
+    pub min_speed_kbps: f64,
+    pub threads: usize,
+    pub repeats: usize,
+    pub interval_sec: u64,
 }
 
-// Результат прохождения этапа
+#[derive(Clone, Debug)]
 pub struct ProxyCandidate {
     pub id: String,
     pub link: ProxyLink,
     pub last_latency: u128,
     pub last_speed_kbps: f64,
+}
+
+#[derive(Debug)]
+pub struct CheckResult {
+    pub is_working: bool,
+    pub latency_ms: u128,
+    pub speed_kbps: f64,
 }
