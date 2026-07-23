@@ -1,5 +1,5 @@
-use crate::checker::link_to_config;
-use crate::models::{ProxyCandidate, APP_DIR};
+use crate::builder::build_outbound_from_link;
+use crate::models::{ProxyCandidate, XrayConfig, APP_DIR};
 use std::path::PathBuf;
 use sysproxy::Sysproxy;
 use tokio::process::{Child, Command};
@@ -14,29 +14,40 @@ impl XrayService {
         Self { child: None, port }
     }
 
-    /// Генерирует и записывает JSON конфигурацию для Xray
-    pub async fn write_config(&self, candidate: &ProxyCandidate) -> Result<PathBuf, String> {
-        let config_dir = APP_DIR.join("config");
-        tokio::fs::create_dir_all(&config_dir)
-            .await
-            .map_err(|e| format!("Ошибка создания папки конфига: {}", e))?;
-
-        let config_file = config_dir.join("xray.json");
-        let xray_config = link_to_config(candidate, self.port);
-
-        let config_json = serde_json::to_string_pretty(&xray_config)
-            .map_err(|e| format!("Ошибка сериализации JSON: {}", e))?;
-
-        tokio::fs::write(&config_file, config_json)
-            .await
-            .map_err(|e| format!("Ошибка записи файла xray.json: {}", e))?;
-
-        Ok(config_file)
+    /// Генерирует XrayConfig из кандидата
+    pub fn build_config(candidate: &ProxyCandidate, port: u16) -> XrayConfig {
+        let outbound = build_outbound_from_link(&candidate.link);
+        XrayConfig::new_with_proxy(outbound, port)
     }
 
-    /// Запускает процесс Xray с указанным конфигом (без вывода в консоль при `silent = true`)
+    /// Генерирует и сохраняет JSON-конфиг во временный или постоянный файл
+    pub async fn write_config_to_file(
+        config: &XrayConfig,
+        target_path: &PathBuf,
+    ) -> Result<(), String> {
+        if let Some(parent) = target_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Ошибка создания директории {:?}: {}", parent, e))?;
+        }
+
+        let config_json = serde_json::to_string_pretty(config)
+            .map_err(|e| format!("Ошибка сериализации JSON: {}", e))?;
+
+        tokio::fs::write(target_path, config_json)
+            .await
+            .map_err(|e| format!("Ошибка записи файла конфига: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Запускает процесс xray.exe с указанным конфигом
     pub fn spawn_process(&mut self, config_path: &PathBuf, silent: bool) -> Result<(), String> {
         let xray_exe = APP_DIR.join("xray.exe");
+
+        if !xray_exe.exists() {
+            return Err(format!("Исполняемый файл xray.exe не найден по пути: {:?}", xray_exe));
+        }
 
         let mut cmd = Command::new(&xray_exe);
         cmd.arg("run").arg("-c").arg(config_path);
@@ -61,13 +72,13 @@ impl XrayService {
                 enable,
                 host: "127.0.0.1".to_string(),
                 port: self.port,
-                bypass: "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*".to_string(),
+                bypass: "localhost;127.*;10.*;172.16.*;192.168.*".to_string(),
             };
             let _ = sysprox.set_system_proxy();
         }
     }
 
-    /// Безопасно останавливает Xray и снимает системный прокси
+    /// Безопасно останавливает Xray и отключает системный прокси
     pub async fn stop(&mut self) {
         self.set_system_proxy(false);
         if let Some(mut child) = self.child.take() {
@@ -75,7 +86,7 @@ impl XrayService {
         }
     }
 
-    /// Дожидается завершения процесса (если он упал сам)
+    /// Дожидается завершения процесса Xray
     pub async fn wait(&mut self) -> Option<std::process::ExitStatus> {
         if let Some(mut child) = self.child.take() {
             child.wait().await.ok()
@@ -85,12 +96,12 @@ impl XrayService {
     }
 }
 
-/// Сохранение списка проверенных рабочих конфигов в файл
+/// Сохраняет отобранные рабочие конфиги в results/working_configs.json
 pub async fn save_working_configs(candidates: &[ProxyCandidate]) -> Result<PathBuf, String> {
     let out_dir = APP_DIR.join("results");
     tokio::fs::create_dir_all(&out_dir)
         .await
-        .map_err(|e| format!("Ошибка создания папки результатов: {}", e))?;
+        .map_err(|e| format!("Ошибка создания папки results: {}", e))?;
 
     let file_path = out_dir.join("working_configs.json");
     let json_data = serde_json::to_string_pretty(candidates)
@@ -98,7 +109,7 @@ pub async fn save_working_configs(candidates: &[ProxyCandidate]) -> Result<PathB
 
     tokio::fs::write(&file_path, json_data)
         .await
-        .map_err(|e| format!("Ошибка записи результатов: {}", e))?;
+        .map_err(|e| format!("Ошибка записи working_configs.json: {}", e))?;
 
     Ok(file_path)
 }

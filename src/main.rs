@@ -3,21 +3,17 @@ mod checker;
 mod fetcher;
 mod models;
 mod parser;
+mod xray;
 
 use std::io::{self, Write};
-use std::time::Duration;
-
 use checker::run_pipeline;
 use fetcher::fetch_subscription;
-use models::TestStage;
+use models::{TestStage, APP_DIR};
 use parser::parse_subscription_feed;
-use tokio::process::Command;
-use tokio::time::sleep;
+use xray::{save_working_configs, XrayService};
 
-use sysproxy::Sysproxy;
-
-// Константа для статичного порта подключений
 const SOCKS_PORT: u16 = 10818;
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,7 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    
+    // Сохранение результатов в JSON
+    if let Ok(path) = save_working_configs(&working_configs).await {
+        println!("\n💾 Рабочие конфиги сохранены в файл: {:?}", path);
+    }
 
     // 5. Вывод списка и интерактивный выбор
     println!("\n=== ДОСТУПНЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ VPN ===");
@@ -94,55 +93,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let selected_candidate = &working_configs[selected_index];
-    println!(
-        "\n🚀 Запуск подключения к [{}]...",
-        selected_candidate.link.remark()
-    );
-    
-    // 6. Формирование и сохранение конфига на фиксированном порту
-    let config_dir = models::APP_DIR.join("config");
-    tokio::fs::create_dir_all(&config_dir)
-        .await
-        .map_err(|e| format!("Не удалось создать директорию конфига: {}", e))?;
+    println!("\n🚀 Запуск подключения к [{}]...", selected_candidate.link.remark());
 
-    let config_file = config_dir.join("xray.json");
-    let xray_config = checker::link_to_config(selected_candidate, SOCKS_PORT);
+    // 6. Инициализация XrayService для подключения выбранного конфига
+    let mut service = XrayService::new(SOCKS_PORT);
+    let final_config = XrayService::build_config(selected_candidate, SOCKS_PORT);
+    let config_file = APP_DIR.join("config").join("xray.json");
 
-    let config_json = serde_json::to_string_pretty(&xray_config)
-        .map_err(|e| format!("Ошибка сериализации JSON: {}", e))?;
-
-    tokio::fs::write(&config_file, config_json)
-        .await
-        .map_err(|e| format!("Ошибка записи в файл xray.json: {}", e))?;
-
-    // 7. Запуск процессов Xray
-    let xray_exe = models::APP_DIR.join("xray.exe");
-    let mut child = Command::new(&xray_exe)
-        .arg("run")
-        .arg("-c")
-        .arg(&config_file)
-        .spawn()
-        .map_err(|e| format!("Не удалось запустить xray.exe: {}", e))?;
+    XrayService::write_config_to_file(&final_config, &config_file).await?;
+    service.spawn_process(&config_file, false)?;
+    service.set_system_proxy(true);
 
     println!("✅ Подключение установлено!");
     println!("SOCKS5/HTTP Порт: 127.0.0.1:{}", SOCKS_PORT);
     println!("Для завершения работы нажмите Ctrl + C\n");
 
-    if sysproxy::Sysproxy::is_support() {
-        let sysprox = sysproxy::Sysproxy{enable: true, host: "127.0.0.1".to_string(), port:SOCKS_PORT, bypass:"http".to_string()};
-        _ = sysprox.set_system_proxy();
-    }
-
-    
-    // Ожидание сигнала от пользователя Ctrl+C для чистой остановки
+    // 7. Чистое завершение при Ctrl+C или падении процесса
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            _ = sysproxy::Sysproxy{enable: false, host: "127.0.0.1".to_string(), port:SOCKS_PORT, bypass:"http".to_string()}.set_system_proxy();
-            println!("\nОстанавливаем Xray и завершаем работу...");
-            let _ = child.kill().await;
+            println!("\nОстанавливаем Xray и восстанавливаем настройки сети...");
+            service.stop().await;
         }
-        status = child.wait() => {
-            println!("\nProcess Xray завершился с кодом: {:?}", status);
+        status = service.wait() => {
+            service.set_system_proxy(false);
+            println!("\nПроцесс Xray завершился с кодом: {:?}", status);
         }
     }
 
