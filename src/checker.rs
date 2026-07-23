@@ -1,5 +1,6 @@
 use crate::builder::build_outbound_from_link;
 use crate::models::*;
+use futures_util::StreamExt;
 use reqwest::Client;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -7,13 +8,17 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout, Instant};
-use futures_util::StreamExt;
 
-fn get_free_port() -> u16 {
+pub fn get_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map(|addr| addr.port())
         .unwrap_or(10808)
+}
+
+pub fn link_to_config(candidate: &ProxyCandidate, port: u16) -> XrayConfig {
+    let outbound = build_outbound_from_link(&candidate.link);
+    XrayConfig::new_with_proxy(outbound, port)
 }
 
 pub async fn test_http_ping(socks_port: u16, timeout_dur: Duration) -> bool {
@@ -34,12 +39,16 @@ pub async fn test_http_ping(socks_port: u16, timeout_dur: Duration) -> bool {
     )
     .await
     {
-        Ok(Ok(resp)) => resp.status().is_success(),
+        Ok(Ok(resp)) => resp.status().is_success() || resp.status().as_u16() == 204,
         _ => false,
     }
 }
 
-pub async fn measure_speed_kbps(socks_port: u16, timeout_dur: Duration, min_speed_kbps: f64) -> Option<f64> {
+pub async fn measure_speed_kbps(
+    socks_port: u16,
+    timeout_dur: Duration,
+    min_speed_kbps: f64,
+) -> Option<f64> {
     let proxy_url = format!("http://127.0.0.1:{}", socks_port);
 
     let client = Client::builder()
@@ -47,20 +56,23 @@ pub async fn measure_speed_kbps(socks_port: u16, timeout_dur: Duration, min_spee
         .timeout(timeout_dur)
         .build()
         .ok()?;
-    
-    let test_url = if min_speed_kbps >= 100.0 {"http://cachefly.cachefly.net/1mb.test"} else {"http://cachefly.cachefly.net/5mb.test"};
-    
-    let response = timeout(timeout_dur, client.get(test_url).send()).await.ok()?.ok()?;
+
+    let bytes_to_fetch = if min_speed_kbps >= 500.0 { 2_000_000 } else { 500_000 };
+    let test_url = format!("https://speed.cloudflare.com/__down?bytes={}", bytes_to_fetch);
+
+    let response = timeout(timeout_dur, client.get(&test_url).send())
+        .await
+        .ok()?
+        .ok()?;
+
     if !response.status().is_success() {
         return None;
     }
 
-    // Засекаем время ТОЛЬКО когда сервер начал отдавать данные
     let download_start = Instant::now();
     let mut downloaded_bytes = 0;
     let mut stream = response.bytes_stream();
 
-    // Читаем поток байт
     while let Ok(Some(chunk_result)) = timeout(timeout_dur, stream.next()).await {
         if let Ok(chunk) = chunk_result {
             downloaded_bytes += chunk.len();
@@ -71,7 +83,7 @@ pub async fn measure_speed_kbps(socks_port: u16, timeout_dur: Duration, min_spee
 
     let duration_secs = download_start.elapsed().as_secs_f64();
 
-    if duration_secs > 0.1 && downloaded_bytes > 0 {
+    if duration_secs > 0.05 && downloaded_bytes > 0 {
         let speed_kbps = (downloaded_bytes as f64 / 1024.0) / duration_secs;
         Some(speed_kbps)
     } else {
@@ -79,19 +91,14 @@ pub async fn measure_speed_kbps(socks_port: u16, timeout_dur: Duration, min_spee
     }
 }
 
-fn link_to_config(candidate: &ProxyCandidate, port: u16) {
-    let outbound = build_outbound_from_link(&candidate.link);
-    XrayConfig::new_with_proxy(outbound, port);
-}
-
 pub async fn check_single_candidate(
     candidate: &ProxyCandidate,
     need_speedtest: bool,
-    min_speed_kbps: f64
+    min_speed_kbps: f64,
 ) -> CheckResult {
     let test_socks_port = get_free_port();
 
-    let xray_config = link_to_config(candidate,test_socks_port);
+    let xray_config = link_to_config(candidate, test_socks_port);
 
     let config_json = match serde_json::to_string(&xray_config) {
         Ok(j) => j,
@@ -103,12 +110,12 @@ pub async fn check_single_candidate(
             }
         }
     };
+    let tmp = APP_DIR.join("tmp");
 
-    let temp_config_path = format!(
-        "C:\\Users\\r1ceb\\Desktop\\onlyprox\\tmp\\xray_check_{}_{}.json",
-        candidate.id, test_socks_port
-    );
-    let _ = tokio::fs::create_dir_all("C:\\Users\\r1ceb\\Desktop\\onlyprox\\tmp").await;
+    let temp_config_path = tmp
+    .join(format!("xray_check_{}_{}.json", candidate.id, test_socks_port));
+    
+    let _ = tokio::fs::create_dir_all(&tmp).await;
 
     if tokio::fs::write(&temp_config_path, config_json)
         .await
@@ -120,8 +127,9 @@ pub async fn check_single_candidate(
             speed_kbps: 0.0,
         };
     }
-
-    let mut child = match Command::new("C:\\Users\\r1ceb\\Desktop\\Xray-windows-64\\xray.exe")
+    
+    let xray = APP_DIR.join("xray.exe");
+    let mut child = match Command::new(&xray)
         .arg("run")
         .arg("-c")
         .arg(&temp_config_path)
@@ -140,10 +148,10 @@ pub async fn check_single_candidate(
         }
     };
 
-    sleep(Duration::from_millis(300)).await;
+    sleep(Duration::from_millis(400)).await;
 
     let start_time = Instant::now();
-    let is_ping_ok = test_http_ping(test_socks_port, Duration::from_secs(4)).await;
+    let is_ping_ok = test_http_ping(test_socks_port, Duration::from_secs(5)).await;
     let latency_ms = start_time.elapsed().as_millis();
 
     let mut speed_kbps = 0.0;
@@ -151,8 +159,7 @@ pub async fn check_single_candidate(
 
     if is_ping_ok {
         if need_speedtest {
-            if let Some(speed) = measure_speed_kbps(test_socks_port, Duration::from_secs(8), min_speed_kbps).await
-            {
+            if let Some(speed) = measure_speed_kbps(test_socks_port, Duration::from_secs(6), min_speed_kbps).await {
                 speed_kbps = speed;
                 is_working = true;
             }
@@ -160,6 +167,7 @@ pub async fn check_single_candidate(
             is_working = true;
         }
     }
+
     let _ = child.kill().await;
     let _ = tokio::fs::remove_file(&temp_config_path).await;
 
@@ -170,6 +178,7 @@ pub async fn check_single_candidate(
     }
 }
 
+// ВОТ ЭТА ФУНКЦИЯ ОБЯЗАТЕЛЬНО ДОЛЖНА БЫТЬ 'pub'
 pub async fn run_pipeline(
     initial_links: Vec<ProxyLink>,
     stages: Vec<TestStage>,
@@ -226,7 +235,11 @@ pub async fn run_pipeline(
                         sleep(Duration::from_secs(stage_info.interval_sec)).await;
                     }
 
-                    let res = check_single_candidate(&candidate, stage_info.speedtest, stage_info.min_speed_kbps).await;
+                    let res = check_single_candidate(
+                        &candidate, 
+                        stage_info.speedtest, 
+                        stage_info.min_speed_kbps
+                    ).await;
 
                     if !res.is_working || res.speed_kbps < stage_info.min_speed_kbps {
                         passed_all_repeats = false;

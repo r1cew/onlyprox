@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
+pub static APP_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XrayConfig {
@@ -53,7 +63,7 @@ impl XrayConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProxyLink {
     Vless(VlessData),
     Vmess(VmessData),
@@ -72,7 +82,7 @@ impl ProxyLink {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VlessData {
     pub uuid: String,
     pub address: String,
@@ -81,7 +91,7 @@ pub struct VlessData {
     pub remark: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmessData {
     pub remark: String,
     pub address: String,
@@ -95,7 +105,7 @@ pub struct VmessData {
     pub sni: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrojanData {
     pub password: String,
     pub address: String,
@@ -104,7 +114,7 @@ pub struct TrojanData {
     pub remark: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SsData {
     pub method: String,
     pub password: String,
@@ -123,7 +133,7 @@ pub struct TestStage {
     pub interval_sec: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyCandidate {
     pub id: String,
     pub link: ProxyLink,
