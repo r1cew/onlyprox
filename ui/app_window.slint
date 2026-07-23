@@ -1,0 +1,203 @@
+import { Button, ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import "../fonts/BabelStoneFlags.ttf";
+// Структура данных конфигурации
+export struct ServerConfig {
+    name: string,
+    flag: string,
+    ping: string,
+    speed: string,
+    selected: bool,
+}
+
+// Компонент одной строки сервера
+component ServerItem inherits Rectangle {
+    in property <string> name;
+    in property <string> flag;
+    in property <string> ping;
+    in property <string> speed;
+    in property <bool> is_selected;
+    callback selected();
+
+    height: 52px;
+    background: is_selected ? #3a3a3c : #1c1c1e;
+    border-radius: 8px;
+
+    TouchArea { clicked => { root.selected(); } }
+
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        
+        // Text { text: flag; font-size: 16px; vertical-alignment: center; }
+        
+        Text { 
+            text: name; 
+            color: #ffffff; 
+            font-size: 13px; 
+            vertical-alignment: center;
+            horizontal-stretch: 1; 
+            font-family: "BabelStone Flags";
+        }
+
+        VerticalBox {
+            alignment: center;
+            spacing: 2px;
+            Text { text: ping; color: #8e8e93; font-size: 11px; horizontal-alignment: right; }
+            Text { text: speed; color: #30d158; font-size: 11px; horizontal-alignment: right; }
+        }
+    }
+}
+
+// Главное окно приложения
+export component MainWindow inherits Window {
+    title: "onlyprox";
+    preferred-width: 960px;
+    preferred-height: 700px;
+    background: #121212;
+    
+    icon: @image-url("../assets/shield.svg");
+
+    in-out property <bool> is_connected: false;
+    in-out property <bool> is_searching: false;
+    in-out property <float> search_progress: 0.45; // от 0.0 до 1.0
+    in-out property <string> search_stage: "Поиск серверов...";
+
+    in-out property <[ServerConfig]> configs: [
+        { name: "🇳🇱 France, Paris | [BL]", flag: "🇫🇷", ping: "67 ms", speed: "2.2 MB/s", selected: true },
+        { name: "🇳🇱 France, Paris | [BL]", flag: "🇫🇷", ping: "603 ms", speed: "12.2 MB/s", selected: false },
+        { name: "Finland, Helsinki | [BL]", flag: "🇫🇮", ping: "645 ms", speed: "11.0 MB/s", selected: false }
+    ];
+
+    callback toggle_vpn();
+    callback start_search();
+    callback select_config(int);
+    callback refresh_configs();
+
+    HorizontalBox {
+        padding: 20px;
+        spacing: 20px;
+
+        // Левая панель (Управление)
+        VerticalBox {
+            width: 260px;
+            alignment: space-between;
+
+            // Кнопка ВКЛ / ВЫКЛ
+            HorizontalBox {
+                alignment: center;
+                Rectangle {
+                    width: 140px;
+                    height: 140px;
+                    border-radius: 24px;
+                    background: root.is_connected ? #30d158 : #2c2c2e;
+                    
+                    animate background { duration: 200ms; }
+
+
+                    Image {
+                        source: @image-url("../assets/power.svg"); // Скачайте любую SVG-иконку обновления
+                        width: 52px;
+                        height: 52px;
+                        image-fit: contain;
+                        // Если нужно покрасить иконку в определенный цвет (например, белый):
+                        colorize: #ffffff; 
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Нижняя область (Кнопка поиска / Прогресс)
+            TouchArea { clicked => { root.toggle_vpn(); } }
+            Rectangle {
+                height: 50px;
+                background: #2c2c2e;
+                border-radius: 12px;
+                clip: true;
+
+                TouchArea { 
+                    clicked => { 
+                        if (!root.is_searching) { root.start_search(); }
+                    } 
+                }
+
+                // Полоса прогресса
+                if root.is_searching : Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width * root.search_progress;
+                    height: parent.height;
+                    background: #0a84ff;
+                }
+
+                Text {
+                    text: root.is_searching ? root.search_stage : "Поиск конфигураций";
+                    color: #ffffff;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Правая панель (Cписок конфигураций)
+        Rectangle {
+            background: #1c1c1e;
+            border-radius: 14px;
+            horizontal-stretch: 1;
+
+            VerticalBox {
+                padding: 16px;
+                spacing: 12px;
+
+                // Заголовок и кнопка обновления
+                HorizontalBox {
+                    Text {
+                        text: "Конфигурации";
+                        color: #ffffff;
+                        font-size: 16px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Rectangle {
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 21px;
+                        background: #2c2c2e;
+
+                        TouchArea { clicked => { root.refresh_configs(); } }
+
+                        Image {
+                            source: @image-url("../assets/rotate-ccw.svg"); // Скачайте любую SVG-иконку обновления
+                            width: 24px;
+                            height: 24px;
+                            image-fit: contain;
+                            // Если нужно покрасить иконку в определенный цвет (например, белый):
+                            colorize: #ffffff; 
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Список
+                ScrollView {
+                    VerticalBox {
+                        spacing: 8px;
+                        for cfg[index] in root.configs : ServerItem {
+                            name: cfg.name;
+                            // flag: cfg.flag;
+                            ping: cfg.ping;
+                            speed: cfg.speed;
+                            is_selected: cfg.selected;
+                            selected => { root.select_config(index); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

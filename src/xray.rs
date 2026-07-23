@@ -43,7 +43,7 @@ impl XrayService {
 
     /// Запускает процесс xray.exe с указанным конфигом
     pub fn spawn_process(&mut self, config_path: &PathBuf, silent: bool) -> Result<(), String> {
-        let xray_exe = APP_DIR.join("xray.exe");
+        let xray_exe = APP_DIR.join("bin/xray.exe");
 
         if !xray_exe.exists() {
             return Err(format!("Исполняемый файл xray.exe не найден по пути: {:?}", xray_exe));
