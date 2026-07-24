@@ -128,7 +128,11 @@ pub async fn check_single_candidate(
         };
     }
     
-    let xray = APP_DIR.join("xray.exe");
+    #[cfg(target_os = "windows")]
+    let xray = APP_DIR.join("bin").join("xray.exe");
+    #[cfg(target_os = "linux")]
+    let xray = APP_DIR.join("bin").join("xray");
+
     let mut child = match Command::new(&xray)
         .arg("run")
         .arg("-c")
