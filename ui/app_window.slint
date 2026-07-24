@@ -1,26 +1,35 @@
 import { Button, ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
 import "../fonts/BabelStoneFlags.ttf";
-// Структура данных конфигурации
+
 export struct ServerConfig {
     name: string,
     flag: string,
     ping: string,
     speed: string,
     selected: bool,
+    is_connected: bool,
 }
 
-// Компонент одной строки сервера
 component ServerItem inherits Rectangle {
     in property <string> name;
     in property <string> flag;
     in property <string> ping;
     in property <string> speed;
     in property <bool> is_selected;
+    in property <bool> is_connected;
     callback selected();
 
     height: 52px;
+    
+    // Выделение фоном работает ВСЕГДА при клике (серый цвет)
     background: is_selected ? #3a3a3c : #1c1c1e;
+    
+    // Зеленая рамка показывает только активное подключение!
     border-radius: 8px;
+    border-width: is_connected ? 2px : 0px;
+    border-color: #30d158;
+
+    animate background { duration: 150ms; }
 
     TouchArea { clicked => { root.selected(); } }
 
@@ -29,8 +38,18 @@ component ServerItem inherits Rectangle {
         padding-right: 12px;
         spacing: 12px;
         
-        // Text { text: flag; font-size: 16px; vertical-alignment: center; }
-        
+        // Зеленый индикатор активного соединения
+        if is_connected : VerticalBox {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: #30d158;
+            }
+        }
+
+
         Text { 
             text: name; 
             color: #ffffff; 
@@ -43,31 +62,38 @@ component ServerItem inherits Rectangle {
         VerticalBox {
             alignment: center;
             spacing: 2px;
-            Text { text: ping; color: #8e8e93; font-size: 11px; horizontal-alignment: right; }
-            Text { text: speed; color: #30d158; font-size: 11px; horizontal-alignment: right; }
+            
+            Text { 
+                text: is_connected ? "ПОДКЛЮЧЕНО" : ping; 
+                color: is_connected ? #30d158 : #8e8e93; 
+                font-size: 11px; 
+                horizontal-alignment: right; 
+                font-weight: is_connected ? 700 : 400;
+            }
+            Text { 
+                text: speed; 
+                color: #30d158; 
+                font-size: 11px; 
+                horizontal-alignment: right; 
+            }
         }
     }
 }
 
-// Главное окно приложения
 export component MainWindow inherits Window {
     title: "onlyprox";
     preferred-width: 960px;
     preferred-height: 700px;
     background: #121212;
-    
+
     icon: @image-url("../assets/shield.svg");
 
     in-out property <bool> is_connected: false;
     in-out property <bool> is_searching: false;
-    in-out property <float> search_progress: 0.45; // от 0.0 до 1.0
+    in-out property <float> search_progress: 0.0;
     in-out property <string> search_stage: "Поиск серверов...";
 
-    in-out property <[ServerConfig]> configs: [
-        { name: "🇳🇱 France, Paris | [BL]", flag: "🇫🇷", ping: "67 ms", speed: "2.2 MB/s", selected: true },
-        { name: "🇳🇱 France, Paris | [BL]", flag: "🇫🇷", ping: "603 ms", speed: "12.2 MB/s", selected: false },
-        { name: "Finland, Helsinki | [BL]", flag: "🇫🇮", ping: "645 ms", speed: "11.0 MB/s", selected: false }
-    ];
+    in-out property <[ServerConfig]> configs: [];
 
     callback toggle_vpn();
     callback start_search();
@@ -78,51 +104,62 @@ export component MainWindow inherits Window {
         padding: 20px;
         spacing: 20px;
 
-        // Левая панель (Управление)
         VerticalBox {
             width: 260px;
             alignment: space-between;
 
-            // Кнопка ВКЛ / ВЫКЛ
             HorizontalBox {
                 alignment: center;
                 Rectangle {
                     width: 140px;
                     height: 140px;
                     border-radius: 24px;
-                    background: root.is_connected ? #30d158 : #2c2c2e;
                     
-                    animate background { duration: 200ms; }
+                    background: power-ta.has-hover ? 
+                        (root.is_connected ? #34e162 : #3a3a3c) : 
+                        (root.is_connected ? #30d158 : #2c2c2e); 
+                    
+                    animate background { duration: 100ms; }
 
+                    power-ta := TouchArea {
+                        clicked => { root.toggle_vpn(); }
+                    }
 
                     Image {
-                        source: @image-url("../assets/power.svg"); // Скачайте любую SVG-иконку обновления
+                        source: @image-url("../assets/power.svg");
                         width: 52px;
                         height: 52px;
                         image-fit: contain;
-                        // Если нужно покрасить иконку в определенный цвет (например, белый):
-                        colorize: #ffffff; 
+                        colorize: power-ta.has-hover ? #ffffff : #e0e0e0; 
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                        animate colorize { duration: 100ms; }
                     }
                 }
             }
 
-            // Нижняя область (Кнопка поиска / Прогресс)
-            TouchArea { clicked => { root.toggle_vpn(); } }
             Rectangle {
                 height: 50px;
-                background: #2c2c2e;
+                background: search_ta.has-hover ? #3a3a3c : #2c2c2e;
                 border-radius: 12px;
                 clip: true;
-
-                TouchArea { 
+                
+                animate background { duration: 100ms; }
+                
+                search_ta := TouchArea { 
                     clicked => { 
                         if (!root.is_searching) { root.start_search(); }
                     } 
                 }
+                
+                if root.is_searching : Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    background: #2c2c2e;
+                }
 
-                // Полоса прогресса
                 if root.is_searching : Rectangle {
                     x: 0px;
                     y: 0px;
@@ -134,14 +171,15 @@ export component MainWindow inherits Window {
                 Text {
                     text: root.is_searching ? root.search_stage : "Поиск конфигураций";
                     color: #ffffff;
-                    font-size: 14px;
+                    font-size: 12px;
+                    font-weight: 600;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
                 }
             }
         }
 
-        // Правая панель (Cписок конфигураций)
         Rectangle {
             background: #1c1c1e;
             border-radius: 14px;
@@ -151,7 +189,6 @@ export component MainWindow inherits Window {
                 padding: 16px;
                 spacing: 12px;
 
-                // Заголовок и кнопка обновления
                 HorizontalBox {
                     Text {
                         text: "Конфигурации";
@@ -166,33 +203,40 @@ export component MainWindow inherits Window {
                         width: 42px;
                         height: 42px;
                         border-radius: 21px;
-                        background: #2c2c2e;
+                        background: ta.has-hover ? #3a3a3c : #2c2c2e;
 
-                        TouchArea { clicked => { root.refresh_configs(); } }
+                        animate background {
+                            duration: 100ms;
+                            easing: ease-in-out;
+                        }
+
+                        ta := TouchArea { 
+                            clicked => { root.refresh_configs(); } 
+                        }
 
                         Image {
-                            source: @image-url("../assets/rotate-ccw.svg"); // Скачайте любую SVG-иконку обновления
+                            source: @image-url("../assets/rotate-ccw.svg");
                             width: 24px;
                             height: 24px;
                             image-fit: contain;
-                            // Если нужно покрасить иконку в определенный цвет (например, белый):
-                            colorize: #ffffff; 
+                            colorize: ta.has-hover ? #ffffff : #bbbbbb; 
                             horizontal-alignment: center;
                             vertical-alignment: center;
+
+                            animate colorize { duration: 100ms; }
                         }
                     }
                 }
 
-                // Список
                 ScrollView {
                     VerticalBox {
-                        spacing: 8px;
+                        spacing: 0px;
                         for cfg[index] in root.configs : ServerItem {
                             name: cfg.name;
-                            // flag: cfg.flag;
                             ping: cfg.ping;
                             speed: cfg.speed;
                             is_selected: cfg.selected;
+                            is_connected: cfg.is_connected;
                             selected => { root.select_config(index); }
                         }
                     }

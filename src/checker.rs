@@ -1,10 +1,11 @@
+use crate::builder::build_outbound_from_link;
 use crate::models::*;
-use crate::xray::XrayService;
 use futures_util::StreamExt;
 use reqwest::Client;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -13,6 +14,11 @@ pub fn get_free_port() -> u16 {
         .and_then(|l| l.local_addr())
         .map(|addr| addr.port())
         .unwrap_or(10808)
+}
+
+pub fn link_to_config(candidate: &ProxyCandidate, port: u16) -> XrayConfig {
+    let outbound = build_outbound_from_link(&candidate.link);
+    XrayConfig::new_with_proxy(outbound, port)
 }
 
 pub async fn test_http_ping(socks_port: u16, timeout_dur: Duration) -> bool {
@@ -92,21 +98,55 @@ pub async fn check_single_candidate(
 ) -> CheckResult {
     let test_socks_port = get_free_port();
 
-    let mut service = XrayService::new(test_socks_port);
-    let xray_config = XrayService::build_config(candidate, test_socks_port);
+    let xray_config = link_to_config(candidate, test_socks_port);
 
-    let temp_config_path = APP_DIR
-        .join("tmp")
-        .join(format!("xray_check_{}_{}.json", candidate.id, test_socks_port));
+    let config_json = match serde_json::to_string(&xray_config) {
+        Ok(j) => j,
+        Err(_) => {
+            return CheckResult {
+                is_working: false,
+                latency_ms: 0,
+                speed_kbps: 0.0,
+            }
+        }
+    };
+    let tmp = APP_DIR.join("tmp");
 
-    if XrayService::write_config_to_file(&xray_config, &temp_config_path).await.is_err() {
-        return CheckResult { is_working: false, latency_ms: 0, speed_kbps: 0.0 };
+    let temp_config_path = tmp
+    .join(format!("xray_check_{}_{}.json", candidate.id, test_socks_port));
+    
+    let _ = tokio::fs::create_dir_all(&tmp).await;
+
+    if tokio::fs::write(&temp_config_path, config_json)
+        .await
+        .is_err()
+    {
+        return CheckResult {
+            is_working: false,
+            latency_ms: 0,
+            speed_kbps: 0.0,
+        };
     }
-
-    if service.spawn_process(&temp_config_path, true).is_err() {
-        let _ = tokio::fs::remove_file(&temp_config_path).await;
-        return CheckResult { is_working: false, latency_ms: 0, speed_kbps: 0.0 };
-    }
+    
+    let xray = APP_DIR.join("xray.exe");
+    let mut child = match Command::new(&xray)
+        .arg("run")
+        .arg("-c")
+        .arg(&temp_config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&temp_config_path).await;
+            return CheckResult {
+                is_working: false,
+                latency_ms: 0,
+                speed_kbps: 0.0,
+            };
+        }
+    };
 
     sleep(Duration::from_millis(400)).await;
 
@@ -128,7 +168,7 @@ pub async fn check_single_candidate(
         }
     }
 
-    service.stop().await;
+    let _ = child.kill().await;
     let _ = tokio::fs::remove_file(&temp_config_path).await;
 
     CheckResult {
@@ -138,6 +178,7 @@ pub async fn check_single_candidate(
     }
 }
 
+// ВОТ ЭТА ФУНКЦИЯ ОБЯЗАТЕЛЬНО ДОЛЖНА БЫТЬ 'pub'
 pub async fn run_pipeline(
     initial_links: Vec<ProxyLink>,
     stages: Vec<TestStage>,
@@ -195,11 +236,10 @@ pub async fn run_pipeline(
                     }
 
                     let res = check_single_candidate(
-                        &candidate,
-                        stage_info.speedtest,
-                        stage_info.min_speed_kbps,
-                    )
-                    .await;
+                        &candidate, 
+                        stage_info.speedtest, 
+                        stage_info.min_speed_kbps
+                    ).await;
 
                     if !res.is_working || res.speed_kbps < stage_info.min_speed_kbps {
                         passed_all_repeats = false;

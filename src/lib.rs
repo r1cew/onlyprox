@@ -7,9 +7,8 @@ pub mod xray;
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::{mpsc, Mutex};
 
 use checker::run_pipeline;
@@ -23,19 +22,35 @@ slint::include_modules!();
 const SOCKS_PORT: u16 = 10818;
 const FEED_URL: &str = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt";
 
-// Состояния, передаваемые из фонового потока в UI
+
 enum AppCommand {
+    LoadSavedConfigs,
     StartPipeline,
     ToggleConnect,
     SelectConfig(usize),
+    Shutdown, // Добавили команду завершения
 }
 
-// Хранимый в потоке активный сервис Xray
 struct AppState {
     working_configs: Vec<ProxyCandidate>,
     selected_index: Option<usize>,
+    connected_index: Option<usize>,
     xray_service: Option<XrayService>,
     is_connected: bool,
+}
+
+impl AppState {
+    /// Полный сброс VPN и корректная остановка Xray
+    pub async fn stop_vpn(&mut self) {
+        if let Some(ref mut service) = self.xray_service {
+            // Внутри service.stop() также должен быть сброс системного прокси
+            service.set_system_proxy(false);
+            service.stop().await;
+        }
+        self.xray_service = None;
+        self.is_connected = false;
+        self.connected_index = None;
+    }
 }
 
 impl Default for AppState {
@@ -43,25 +58,19 @@ impl Default for AppState {
         Self {
             working_configs: Vec::new(),
             selected_index: None,
+            connected_index: None,
             xray_service: None,
             is_connected: false,
         }
     }
 }
 
-/// Единая точка запуска GUI-приложения
 pub fn run_app() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
 
-    // Канал связи между Slint UI и фоновым Tokio Worker
     let (tx, mut rx) = mpsc::channel::<AppCommand>(32);
-
-    // Внутреннее состояние приложения (живет в фоновом Tokio task)
     let state = Arc::new(Mutex::new(AppState::default()));
 
-    // --- 1. РЕГИСТРАЦИЯ КОЛЛБЭКОВ SLINT ---
-
-    // Запуск воронки / обновление
     let tx_search = tx.clone();
     ui.on_start_search(move || {
         let _ = tx_search.try_send(AppCommand::StartPipeline);
@@ -72,21 +81,28 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
         let _ = tx_refresh.try_send(AppCommand::StartPipeline);
     });
 
-    // Включение / Выключение VPN
     let tx_toggle = tx.clone();
     ui.on_toggle_vpn(move || {
         let _ = tx_toggle.try_send(AppCommand::ToggleConnect);
     });
 
-    // Выбор конфига в списке
     let tx_select = tx.clone();
     ui.on_select_config(move |index| {
         let _ = tx_select.try_send(AppCommand::SelectConfig(index as usize));
     });
 
-    // --- 2. ЗАПУСК ФОНОВОГО WORKER (TOKIO RUNTIME) ---
+    // --- ОБРАБОТКА ЗАКРЫТИЯ ОКНА ---
+    let tx_close = tx.clone();
+    ui.window().on_close_requested(move || {
+        // Отправляем сигнал завершения в бэкенд
+        let _ = tx_close.try_send(AppCommand::Shutdown);
+        
+        // Разрешаем закрытие окна
+        slint::CloseRequestResponse::HideWindow
+    });
+
     let ui_handle = ui.as_weak();
-    let state_clone = Arc::clone(&state);
+    let state_clone = Arc::clone(&state);   
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -96,6 +112,9 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
                 let state = Arc::clone(&state_clone);
 
                 match cmd {
+                    AppCommand::LoadSavedConfigs => {
+                        handle_load_saved_configs(ui_weak, state).await;
+                    }
                     AppCommand::StartPipeline => {
                         handle_pipeline(ui_weak, state).await;
                     }
@@ -105,24 +124,72 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
                     AppCommand::SelectConfig(index) => {
                         handle_select_config(ui_weak, state, index).await;
                     }
+                    AppCommand::Shutdown => {
+                        // Очищаем ресурсы Xray перед выходом
+                        let mut lock = state.lock().await;
+                        lock.stop_vpn().await;
+                        break; // Завершаем рабочий цикл async-рантайма
+                    }
                 }
             }
         });
     });
 
-    // Автоматический запуск поиска при старте приложения
-    let _ = tx.try_send(AppCommand::StartPipeline);
+    let _ = tx.try_send(AppCommand::LoadSavedConfigs);
 
     ui.run()
 }
 
-// ============================================================================
-//   ХЭНДЛЕРЫ ЛОГИКИ (РАБОТАЮТ В ФОНЕ)
-// ============================================================================
+/// Синхронизация состояния приложения со Slint UI
+fn sync_ui_configs(ui_weak: &slint::Weak<MainWindow>, state: &AppState) {
+    let slint_configs: Vec<ServerConfig> = state
+        .working_configs
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| {
+            let is_selected = state.selected_index == Some(i);
+            // Проверяем именно по connected_index, а не по вычисленному выбору
+            let is_connected = state.is_connected && state.connected_index == Some(i);
+            let speed_mb = candidate.last_speed_kbps / 1024.0;
 
-/// Логика прохождения воронки проверок
+            ServerConfig {
+                name: SharedString::from(candidate.link.remark()),
+                flag: SharedString::from("🌐"),
+                ping: SharedString::from(format!("{} ms", candidate.last_latency)),
+                speed: SharedString::from(format!("{:.1} MB/s", speed_mb)),
+                selected: is_selected,
+                is_connected,
+            }
+        })
+        .collect();
+
+    let ui_weak = ui_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = Rc::new(VecModel::from(slint_configs));
+            ui.set_configs(ModelRc::from(model));
+        }
+    });
+}
+
+async fn handle_load_saved_configs(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppState>>) {
+    let saved_file = APP_DIR.join("results").join("working_configs.json");
+
+    if saved_file.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&saved_file).await {
+            if let Ok(configs) = serde_json::from_str::<Vec<ProxyCandidate>>(&content) {
+                let mut lock = state.lock().await;
+                lock.working_configs = configs;
+                if !lock.working_configs.is_empty() {
+                    lock.selected_index = Some(0);
+                }
+                sync_ui_configs(&ui_weak, &lock);
+            }
+        }
+    }
+}
+
 async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppState>>) {
-    // 1. Показываем статус "Загрузка" в UI
     let _ = slint::invoke_from_event_loop({
         let ui_weak = ui_weak.clone();
         move || {
@@ -134,7 +201,6 @@ async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppS
         }
     });
 
-    // 2. Скачивание и парсинг
     let raw_text = match fetch_subscription(FEED_URL).await {
         Ok(t) => t,
         Err(e) => {
@@ -155,9 +221,8 @@ async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppS
     });
 
     let mut links = parse_subscription_feed(&raw_text);
-    links.truncate(150);
+    links.truncate(50);
 
-    // 3. Конфигурируем этапы воронки
     let test_stages = vec![
         TestStage {
             name: "Этап 1: Быстрый экспресс-пинг".to_string(),
@@ -195,37 +260,19 @@ async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppS
         }
     });
 
-    // 4. Запускаем воронку
     let working_configs = run_pipeline(links, test_stages).await;
     let _ = save_working_configs(&working_configs).await;
 
-    // 5. Обновляем состояние приложения и UI
     let mut lock = state.lock().await;
-    lock.working_configs = working_configs.clone();
-    lock.selected_index = if !working_configs.is_empty() { Some(0) } else { None };
+    lock.working_configs = working_configs;
+    lock.selected_index = if !lock.working_configs.is_empty() { Some(0) } else { None };
 
-    // Формируем список моделей для Slint
-    let slint_configs: Vec<ServerConfig> = working_configs
-        .iter()
-        .enumerate()
-        .map(|(i, candidate)| {
-            let speed_mb = candidate.last_speed_kbps / 1024.0;
-            ServerConfig {
-                name: SharedString::from(candidate.link.remark()),
-                flag: SharedString::from("🌐"), // Можно парсить страну из remark
-                ping: SharedString::from(format!("{} ms", candidate.last_latency)),
-                speed: SharedString::from(format!("{:.1} MB/s", speed_mb)),
-                selected: i == 0,
-            }
-        })
-        .collect();
+    sync_ui_configs(&ui_weak, &lock);
 
     let _ = slint::invoke_from_event_loop({
         let ui_weak = ui_weak.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let model = Rc::new(VecModel::from(slint_configs));
-                ui.set_configs(ModelRc::from(model));
                 ui.set_search_progress(1.0);
                 ui.set_is_searching(false);
             }
@@ -233,25 +280,23 @@ async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppS
     });
 }
 
-/// Переключение Вкл/Выкл VPN
 async fn handle_toggle_vpn(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppState>>) {
     let mut lock = state.lock().await;
 
     if lock.is_connected {
-        // Остановка Xray
-        if let Some(ref mut service) = lock.xray_service {
-            service.stop().await;
-        }
-        lock.xray_service = None;
-        lock.is_connected = false;
+        // Вызываем новый централизованный метод остановки
+        lock.stop_vpn().await;
 
+        let ui_weak_clone = ui_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui_weak.upgrade() {
+            if let Some(ui) = ui_weak_clone.upgrade() {
                 ui.set_is_connected(false);
             }
         });
+
+        sync_ui_configs(&ui_weak, &lock);
     } else {
-        // Подключение выбранного конфига
+        // Подключаем ТЕКУЩИЙ ВЫБРАННЫЙ сервер (selected_index)
         let selected_idx = match lock.selected_index {
             Some(i) => i,
             None => return,
@@ -267,19 +312,22 @@ async fn handle_toggle_vpn(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<Ap
                     service.set_system_proxy(true);
                     lock.xray_service = Some(service);
                     lock.is_connected = true;
+                    lock.connected_index = Some(selected_idx);
 
+                    let ui_weak_clone = ui_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak.upgrade() {
+                        if let Some(ui) = ui_weak_clone.upgrade() {
                             ui.set_is_connected(true);
                         }
                     });
+
+                    sync_ui_configs(&ui_weak, &lock);
                 }
             }
         }
     }
 }
 
-/// Выбор конфигурации из списка UI
 async fn handle_select_config(
     ui_weak: slint::Weak<MainWindow>,
     state: Arc<Mutex<AppState>>,
@@ -291,19 +339,8 @@ async fn handle_select_config(
     }
 
     lock.selected_index = Some(index);
-
-    // Подсветка активной строки в UI
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            let model = ui.get_configs();
-            for i in 0..model.row_count() {
-                if let Some(mut cfg) = model.row_data(i) {
-                    cfg.selected = i == index;
-                    model.set_row_data(i, cfg);
-                }
-            }
-        }
-    });
+    // При переклике по списку меняется только selected_index, connected_index остается прежним
+    sync_ui_configs(&ui_weak, &lock);
 }
 
 fn reset_ui_search(ui_weak: slint::Weak<MainWindow>) {

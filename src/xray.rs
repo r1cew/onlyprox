@@ -1,8 +1,13 @@
 use crate::builder::build_outbound_from_link;
-use crate::models::{ProxyCandidate, XrayConfig, APP_DIR};
+use crate::models::{ProxyCandidate, XrayConfig, CheckIpInfo, APP_DIR};
 use std::path::PathBuf;
+use slint::platform::Key::O;
 use sysproxy::Sysproxy;
 use tokio::process::{Child, Command};
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 
 pub struct XrayService {
     child: Option<Child>,
@@ -41,16 +46,23 @@ impl XrayService {
         Ok(())
     }
 
-    /// Запускает процесс xray.exe с указанным конфигом
+    /// Запускает процесс xray с указанным конфигом
     pub fn spawn_process(&mut self, config_path: &PathBuf, silent: bool) -> Result<(), String> {
-        let xray_exe = APP_DIR.join("bin/xray.exe");
+        #[cfg(target_os = "windows")]
+        let xray = APP_DIR.join("bin/xray.exe");
+        #[cfg(target_os = "linux")]
+        let xray = APP_DIR.join("bin/xray");
 
-        if !xray_exe.exists() {
-            return Err(format!("Исполняемый файл xray.exe не найден по пути: {:?}", xray_exe));
+        if !xray.exists() {
+            return Err(format!("Исполняемый файл xray не найден по пути: {:?}", xray));
         }
 
-        let mut cmd = Command::new(&xray_exe);
+        let mut cmd = Command::new(&xray);
         cmd.arg("run").arg("-c").arg(config_path);
+
+        
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
         if silent {
             cmd.stdout(std::process::Stdio::null())
@@ -59,13 +71,13 @@ impl XrayService {
 
         let child = cmd
             .spawn()
-            .map_err(|e| format!("Не удалось запустить xray.exe: {}", e))?;
+            .map_err(|e| format!("Не удалось запустить xray: {}", e))?;
 
         self.child = Some(child);
         Ok(())
     }
 
-    /// Включает или выключает системный прокси Windows
+    /// Включает или выключает системный прокси 
     pub fn set_system_proxy(&self, enable: bool) {
         if Sysproxy::is_support() {
             let sysprox = Sysproxy {
@@ -112,4 +124,52 @@ pub async fn save_working_configs(candidates: &[ProxyCandidate]) -> Result<PathB
         .map_err(|e| format!("Ошибка записи working_configs.json: {}", e))?;
 
     Ok(file_path)
+}
+
+#[tokio::test]
+async fn get_ip_info() -> Result<(), reqwest::Error> {
+    let flag = request_country_flag().await?;
+
+    println!("{flag}");
+
+    Ok(())
+}
+
+async fn request_country_flag() -> Result<String, reqwest::Error> {
+    let info = reqwest::get("https://ipinfo.io")
+        .await?
+        .json::<CheckIpInfo>()
+        .await?;
+
+    if let Some(country) = info.country {
+        if let Some(flag) = get_flag_emoji(&country) {
+            return Ok(flag);
+        }
+    }
+
+    Ok("🌐".to_string())
+}
+
+
+fn get_flag_emoji(country_code: &str) -> Option<String> {
+    if country_code.len() != 2 {
+        return None;
+    }
+
+    let mut flag = String::new();
+
+    for ch in country_code.to_ascii_uppercase().chars() {
+        if ch.is_ascii_alphabetic() {
+            let code_point = ch as u32 + 127397;
+
+            if let Some(flag_char) = std::char::from_u32(code_point) {
+                flag.push(flag_char);
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    Some(flag)
 }
