@@ -56,6 +56,13 @@ impl AppState {
                 .args(&["/F", "/IM", "xray.exe"])
                 .output();
         }
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("pkill")
+                .args(&["-f", "xray"])
+                .output();
+        }
         
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     }
