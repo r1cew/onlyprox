@@ -10,6 +10,10 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout, Instant};
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+
 pub fn get_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
@@ -170,18 +174,31 @@ pub async fn check_single_candidate(
     }
     
     #[cfg(target_os = "windows")]
-    let xray = APP_DIR.join("bin/xray.exe");
+    let xray = APP_DIR.join("bin").join("xray.exe");
     #[cfg(target_os = "linux")]
-    let xray = APP_DIR.join("bin/xray");
+    let xray = APP_DIR.join("bin").join("xray");
 
-    let mut child = match Command::new(&xray)
-        .arg("run")
+    if !xray.exists() {
+        let _ = tokio::fs::remove_file(&temp_config_path).await;
+        return CheckResult {
+            is_working: false,
+            latency_ms: 0,
+            speed_kbps: 0.0,
+            flag: String::new(),
+        };
+    }
+
+    let mut cmd = Command::new(&xray);
+    cmd.arg("run")
         .arg("-c")
         .arg(&temp_config_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => {
             let _ = tokio::fs::remove_file(&temp_config_path).await;
@@ -193,7 +210,7 @@ pub async fn check_single_candidate(
             };
         }
     };
-
+    
     sleep(Duration::from_millis(400)).await;
 
     let start_time = Instant::now();

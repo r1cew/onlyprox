@@ -20,7 +20,7 @@ use xray::{save_working_configs, XrayService};
 slint::include_modules!();
 
 const SOCKS_PORT: u16 = 10818;
-const FEED_URL: &str = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt";
+const FEED_URL: &str = "https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/22.txt";
 
 
 enum AppCommand {
@@ -40,16 +40,24 @@ struct AppState {
 }
 
 impl AppState {
-    /// Полный сброс VPN и корректная остановка Xray
     pub async fn stop_vpn(&mut self) {
         if let Some(ref mut service) = self.xray_service {
-            // Внутри service.stop() также должен быть сброс системного прокси
             service.set_system_proxy(false);
             service.stop().await;
         }
         self.xray_service = None;
         self.is_connected = false;
         self.connected_index = None;
+        
+        // ДОБАВЬ: убей все xray.exe процессы
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(&["/F", "/IM", "xray.exe"])
+                .output();
+        }
+        
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     }
 }
 
@@ -159,7 +167,6 @@ fn sync_ui_configs(ui_weak: &slint::Weak<MainWindow>, state: &AppState) {
                 speed: SharedString::from(format!("{:.1} MB/s", speed_mb)),
                 selected: is_selected,
                 is_connected,
-                is_updated: false,
             }
         })
         .collect();

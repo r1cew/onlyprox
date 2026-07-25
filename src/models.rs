@@ -22,6 +22,15 @@ pub struct XrayConfig {
 
 impl XrayConfig {
     pub fn new_with_proxy(outbound_proxy: serde_json::Value, socks_port: u16) -> Self {
+        // ОТЛАДКА: вывели address из outbound
+        if let Some(address) = outbound_proxy.get("settings")
+            .and_then(|s| s.get("vnext"))
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("address"))
+        {
+            eprintln!("[DEBUG] Создан конфиг с адресом: {}", address);
+        }
+
         Self {
             log: serde_json::json!({ "loglevel": "warning" }),
             dns: serde_json::json!({
