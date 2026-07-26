@@ -34,12 +34,12 @@ component ServerItem inherits Rectangle {
     TouchArea { clicked => { root.selected(); } }
 
     HorizontalBox {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 12px;
+        padding-left: 8px;
+        padding-right: 0px;
+        spacing: 8px;
         
 
-        Text { 
+        Text {
             text: flag; 
             color: #30d158; 
             font-size: 18px; 
@@ -59,6 +59,7 @@ component ServerItem inherits Rectangle {
 
         VerticalBox {
             alignment: center;
+            padding: 8px;
             spacing: 0px;
             Text { 
                 text: is_connected ? "ПОДКЛЮЧЕНО" : ping; 
@@ -81,8 +82,8 @@ component ServerItem inherits Rectangle {
 
 export component MainWindow inherits Window {
     title: "onlyprox";
-    preferred-width: 960px;
-    preferred-height: 700px;
+    preferred-width: 880px;
+    preferred-height: 640px;
     background: #121212;
 
     icon: @image-url("../assets/shield.svg");
@@ -100,19 +101,22 @@ export component MainWindow inherits Window {
     callback refresh_configs();
 
     HorizontalBox {
-        padding: 20px;
-        spacing: 20px;
+        padding: 8px;
+        spacing: 8px;
 
         VerticalBox {
+            padding: 0px;
+            
             width: 260px;
             alignment: space-between;
 
             HorizontalBox {
+                padding: 55px;
                 alignment: center;
                 Rectangle {
                     width: 140px;
                     height: 140px;
-                    border-radius: 24px;
+                    border-radius: 12px;
                     
                     background: power-ta.has-hover ? 
                         (root.is_connected ? #34e162 : #3a3a3c) : 
@@ -138,9 +142,9 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                height: 50px;
+                height: 72px;
                 background: search_ta.has-hover ? #3a3a3c : #2c2c2e;
-                border-radius: 12px;
+                border-radius: 8px;
                 clip: true;
                 
                 animate background { duration: 100ms; }
@@ -170,38 +174,53 @@ export component MainWindow inherits Window {
                 Text {
                     text: root.is_searching ? root.search_stage : "Поиск конфигураций";
                     color: #ffffff;
-                    font-size: 12px;
-                    font-weight: 600;
+                    font-size: 14px;
+                    font-weight: 700;
+
+                    width: parent.width;
+                    height: parent.height;
                     horizontal-alignment: center;
                     vertical-alignment: center;
-                    horizontal-stretch: 1;
                 }
             }
+                        
+
+            
         }
 
         Rectangle {
             background: #1c1c1e;
-            border-radius: 14px;
+            border-radius: 8px;
             horizontal-stretch: 1;
 
             VerticalBox {
-                padding: 16px;
-                spacing: 12px;
+                padding: 0px;
+                spacing: 0px;
 
                 HorizontalBox {
-                    Text {
+                    padding: 8px;
+                    Rectangle {
+                        // width: 42px;
+                        height: 42px;
+                        border-radius: 8px;
+                        min-width: 220px;
+                        background: #242425;
+                        Text {
+                        
                         text: "Конфигурации";
-                        color: #ffffff;
+                        color: #dcdcd1;
                         font-size: 16px;
                         font-weight: 600;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
 
+                                        }
+
                     Rectangle {
                         width: 42px;
                         height: 42px;
-                        border-radius: 21px;
+                        border-radius: 8px;
                         background: ta.has-hover ? #3a3a3c : #2c2c2e;
 
                         animate background {
