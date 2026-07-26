@@ -4,6 +4,7 @@ pub mod fetcher;
 pub mod models;
 pub mod parser;
 pub mod xray;
+pub mod feeds;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,21 +12,24 @@ use std::sync::Arc;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::{mpsc, Mutex};
 
-use checker::run_pipeline;
+use checker::{run_pipeline, CREATE_NO_WINDOW};
 use fetcher::fetch_subscription;
 use models::{ProxyCandidate, TestStage, APP_DIR};
 use parser::parse_subscription_feed;
 use xray::{save_working_configs, XrayService};
+use std::os::windows::process::CommandExt;
+
 
 slint::include_modules!();
 
 const SOCKS_PORT: u16 = 10818;
-const FEED_URL: &str = "https://github.com/AvenCores/goida-vpn-configs/raw/refs/heads/main/githubmirror/22.txt";
+const FEED_URL: &str = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt";
 
 
 enum AppCommand {
     LoadSavedConfigs,
     StartPipeline,
+    StartPipelineRetest,
     ToggleConnect,
     SelectConfig(usize),
     Shutdown, // Добавили команду завершения
@@ -48,12 +52,13 @@ impl AppState {
         self.xray_service = None;
         self.is_connected = false;
         self.connected_index = None;
-        
+
         // ДОБАВЬ: убей все xray.exe процессы
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("taskkill")
                 .args(&["/F", "/IM", "xray.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
         }
 
@@ -93,7 +98,7 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
 
     let tx_refresh = tx.clone();
     ui.on_refresh_configs(move || {
-        let _ = tx_refresh.try_send(AppCommand::StartPipeline);
+        let _ = tx_refresh.try_send(AppCommand::StartPipelineRetest);
     });
 
     let tx_toggle = tx.clone();
@@ -131,7 +136,10 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
                         handle_load_saved_configs(ui_weak, state).await;
                     }
                     AppCommand::StartPipeline => {
-                        handle_pipeline(ui_weak, state).await;
+                        handle_pipeline(ui_weak, state, false).await;
+                    }
+                    AppCommand::StartPipelineRetest => {
+                        handle_pipeline(ui_weak, state, true).await;
                     }
                     AppCommand::ToggleConnect => {
                         handle_toggle_vpn(ui_weak, state).await;
@@ -145,6 +153,7 @@ pub fn run_app() -> Result<(), slint::PlatformError> {
                         lock.stop_vpn().await;
                         break; // Завершаем рабочий цикл async-рантайма
                     }
+                    _ => {}
                 }
             }
         });
@@ -204,76 +213,138 @@ async fn handle_load_saved_configs(ui_weak: slint::Weak<MainWindow>, state: Arc<
     }
 }
 
-async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppState>>) {
-    let _ = slint::invoke_from_event_loop({
+async fn handle_pipeline(ui_weak: slint::Weak<MainWindow>, state: Arc<Mutex<AppState>>, is_retest: bool) {
+
+    let mut raw_text = String::new();
+
+    if !is_retest {    let _ = slint::invoke_from_event_loop({
         let ui_weak = ui_weak.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_is_searching(true);
                 ui.set_search_progress(0.1);
                 ui.set_search_stage(SharedString::from("Скачивание подписки..."));
+                }
             }
-        }
-    });
+        });
 
-    let raw_text = match fetch_subscription(FEED_URL).await {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Ошибка загрузки: {}", e);
-            reset_ui_search(ui_weak);
-            return;
-        }
-    };
+        raw_text = match fetch_subscription(FEED_URL).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Ошибка загрузки: {}", e);
+                reset_ui_search(ui_weak);
+                return;
+            }
+        };
 
-    let _ = slint::invoke_from_event_loop({
+        let _ = slint::invoke_from_event_loop({
+            let ui_weak = ui_weak.clone();
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_search_progress(0.25);
+                    ui.set_search_stage(SharedString::from("Парсинг ссылок..."));
+                }
+            }
+        });
+    } else {
+        let _ = slint::invoke_from_event_loop({
         let ui_weak = ui_weak.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_searching(true);
                 ui.set_search_progress(0.25);
-                ui.set_search_stage(SharedString::from("Парсинг ссылок..."));
+                ui.set_search_stage(SharedString::from("Обновление результатов..."));
+                }
             }
-        }
-    });
+        });
 
-    let mut links = parse_subscription_feed(&raw_text);
+
+
+    }
+
+
+    
+   
+    let test_stages = if !is_retest {
+        vec![
+            TestStage {
+                name: "Этап 1: Быстрый экспресс-пинг".to_string(),
+                speedtest: false,
+                min_speed_kbps: 0.0,
+                threads: 80,
+                repeats: 1,
+                interval_sec: 0,
+            },
+            TestStage {
+                name: "Этап 2: Проверка канала".to_string(),
+                speedtest: true,
+                min_speed_kbps: 100.0,
+                threads: 40,
+                repeats: 1,
+                interval_sec: 2,
+            },
+            TestStage {
+                name: "Этап 3: Замер стабильности".to_string(),
+                speedtest: true,
+                min_speed_kbps: 1500.0,
+                threads: 16,
+                repeats: 1,
+                interval_sec: 5,
+            },
+        ]
+    } else {
+        vec![
+            TestStage {
+                name: "Этап 1: Быстрый экспресс-пинг".to_string(),
+                speedtest: false,
+                min_speed_kbps: 0.0,
+                threads: 80,
+                repeats: 1,
+                interval_sec: 0,
+            },
+            TestStage {
+                name: "Этап 2: Замер стабильности".to_string(),
+                speedtest: true,
+                min_speed_kbps: 1500.0,
+                threads: 16,
+                repeats: 1,
+                interval_sec: 5,
+            },
+        ]
+    };
+    
+    if is_retest {
+        let _ = slint::invoke_from_event_loop({
+        let ui_weak = ui_weak.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_searching(true);
+                ui.set_search_progress(0.25);
+                ui.set_search_stage(SharedString::from("Обновление результатов..."));
+                }
+            }
+        });
+    } else {
+        let _ = slint::invoke_from_event_loop({
+            let ui_weak = ui_weak.clone();
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_search_progress(0.40);
+                    ui.set_search_stage(SharedString::from("Тестирование серверов..."));
+                }
+            }
+        });
+
+    }
+    
+    let mut links= if !is_retest {
+        parse_subscription_feed(&raw_text)
+    } else {
+        let lock = state.lock().await;
+        lock.working_configs.iter().map(|x| x.link.clone()).collect::<Vec<_>>()
+    };
     links.truncate(50);
 
-    let test_stages = vec![
-        TestStage {
-            name: "Этап 1: Быстрый экспресс-пинг".to_string(),
-            speedtest: false,
-            min_speed_kbps: 0.0,
-            threads: 80,
-            repeats: 1,
-            interval_sec: 0,
-        },
-        TestStage {
-            name: "Этап 2: Проверка канала".to_string(),
-            speedtest: true,
-            min_speed_kbps: 100.0,
-            threads: 40,
-            repeats: 1,
-            interval_sec: 2,
-        },
-        TestStage {
-            name: "Этап 3: Замер стабильности".to_string(),
-            speedtest: true,
-            min_speed_kbps: 1500.0,
-            threads: 16,
-            repeats: 1,
-            interval_sec: 5,
-        },
-    ];
-
-    let _ = slint::invoke_from_event_loop({
-        let ui_weak = ui_weak.clone();
-        move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_search_progress(0.40);
-                ui.set_search_stage(SharedString::from("Тестирование серверов..."));
-            }
-        }
-    });
 
     let working_configs = run_pipeline(links, test_stages).await;
     let _ = save_working_configs(&working_configs).await;
