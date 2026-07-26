@@ -4,7 +4,6 @@ pub mod fetcher;
 pub mod models;
 pub mod parser;
 pub mod xray;
-pub mod feeds;
 
 use std::rc::Rc;
 use std::sync::Arc;

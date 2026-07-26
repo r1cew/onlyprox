@@ -149,15 +149,3 @@ pub struct CheckResult {
     pub speed_kbps: f64,
     pub flag: String,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct CheckIpInfo {
-    pub ip: String,
-    pub city: Option<String>,
-    pub region: Option<String>,
-    pub country: Option<String>,
-    pub loc: Option<String>,
-    pub org: Option<String>,
-    pub postal: Option<String>,
-    pub timezone: Option<String>,
-}

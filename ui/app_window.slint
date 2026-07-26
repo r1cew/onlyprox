@@ -19,63 +19,82 @@ component ServerItem inherits Rectangle {
     in property <bool> is_connected;
     callback selected();
 
-    height: 52px;
+    height: 44px;
     
     // Выделение фоном работает ВСЕГДА при клике (серый цвет)
-    background: is_selected ? #3a3a3c : #1c1c1e;
+    background: is_selected ? (is_connected ? #27a549 : #3a3a3c) : 
+                            (is_connected ? #164e24 : #1c1c1e); 
     
     // Зеленая рамка показывает только активное подключение!
-    border-radius: 8px;
-    border-width: is_connected ? 2px : 0px;
-    border-color: #30d158;
+    border-radius: 6px;
+    // border-width: is_connected ? 2px : 0px;
+    // border-color: #30d158;
+    
 
     animate background { duration: 150ms; }
 
     TouchArea { clicked => { root.selected(); } }
 
     HorizontalBox {
-        padding-left: 8px;
-        padding-right: 0px;
-        spacing: 8px;
+        padding: 2px;
+        spacing: 2px;
         
-
-        Text {
-            text: flag; 
-            color: #30d158; 
-            font-size: 18px; 
-            width: 32px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-            // horizontal-stretch: 1; 
-            font-family: "BabelStone Flags";
-        }
-        Text { 
-            text: name; 
-            color: #ffffff; 
-            font-size: 14px; 
-            vertical-alignment: center;
-            horizontal-stretch: 1; 
-        }
-
-        VerticalBox {
-            alignment: center;
-            padding: 8px;
-            spacing: 0px;
-            Text { 
-                text: is_connected ? "ПОДКЛЮЧЕНО" : ping; 
-                color: is_connected ? #30d158 : #8e8e93; 
-                font-size: 11px; 
-                horizontal-alignment: right; 
-                font-weight: is_connected ? 700 : 400;
-            }
-            
-            Text { 
-                text: speed; 
+        Rectangle {
+            background: #282829;
+            width: 52px;
+            height: 40px;
+            border-radius: 4px;
+            Text {
+                text: flag; 
                 color: #30d158; 
-                font-size: 11px; 
-                horizontal-alignment: right; 
+                font-size: 18px; 
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                // horizontal-stretch: 1; 
+                font-family: "BabelStone Flags";
             }
-            
+        }
+        Rectangle {
+        background: #282829;
+
+        height: 40px;
+        border-radius: 4px;
+            Text { 
+                text: name; 
+                color: #ffffff; 
+                font-size: 14px; 
+                vertical-alignment: center;
+                horizontal-stretch: 1; 
+            }
+        }
+        VerticalBox {
+ 
+            padding: 0px;
+            spacing: 2px;
+            Rectangle {
+                min-width: 52px;
+                background: #282829;
+                height: 19px;
+                border-radius: 4px;
+                Text { 
+                    text: ping; 
+                    color: #8e8e93; 
+                    font-size: 11px; 
+                    horizontal-alignment: right; 
+                }
+            }
+
+            Rectangle {
+                background: #282829;
+                height: 19px;
+                border-radius: 4px;
+                Text { 
+                    text: speed; 
+                    color: #30d158; 
+                    font-size: 11px; 
+                    horizontal-alignment: right; 
+                }
+            }  
         }
     }
 }
@@ -93,7 +112,32 @@ export component MainWindow inherits Window {
     in-out property <float> search_progress: 0.0;
     in-out property <string> search_stage: "Поиск серверов...";
 
-    in-out property <[ServerConfig]> configs: [];
+    in-out property <[ServerConfig]> configs: [
+    {
+        name: "Germany #1",
+        flag: "🇶🇦",
+        ping: "1488 ms",
+        speed: "10 МБ/с",
+        selected: false,
+        is_connected: true,
+    },
+    {
+        name: "Netherlands #2",
+        flag: "🇰🇿",
+        ping: "37 ms",
+        speed: "100 МБ/с",
+        selected: false,
+        is_connected: false,
+    },
+    {
+        name: "Japan #1",
+        flag: "🇯🇵",
+        ping: "186 ms",
+        speed: "41 МБ/с",
+        selected: true,
+        is_connected: false,
+        },
+    ];
 
     callback toggle_vpn();
     callback start_search();
@@ -141,6 +185,10 @@ export component MainWindow inherits Window {
                 }
             }
 
+            
+
+
+
             Rectangle {
                 height: 72px;
                 background: search_ta.has-hover ? #3a3a3c : #2c2c2e;
@@ -170,7 +218,6 @@ export component MainWindow inherits Window {
                     height: parent.height;
                     background: #0a84ff;
                 }
-
                 Text {
                     text: root.is_searching ? root.search_stage : "Поиск конфигураций";
                     color: #ffffff;
@@ -196,31 +243,30 @@ export component MainWindow inherits Window {
             VerticalBox {
                 padding: 0px;
                 spacing: 0px;
-
+                
                 HorizontalBox {
-                    padding: 8px;
+                    padding: 10px;
+                    spacing: 2px;
+                    
                     Rectangle {
                         // width: 42px;
-                        height: 42px;
-                        border-radius: 8px;
+                        height: 52px;
+                        border-radius: 6px;
                         min-width: 220px;
                         background: #242425;
                         Text {
-                        
-                        text: "Конфигурации";
-                        color: #dcdcd1;
-                        font-size: 16px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                            text: "Конфигурации";
+                            color: #dcdcd1;
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
                     }
-
-                                        }
-
                     Rectangle {
-                        width: 42px;
-                        height: 42px;
-                        border-radius: 8px;
+                        width: 52px;
+                        height: 52px;
+                        border-radius: 6px;
                         background: ta.has-hover ? #3a3a3c : #2c2c2e;
 
                         animate background {
@@ -244,11 +290,12 @@ export component MainWindow inherits Window {
                             animate colorize { duration: 100ms; }
                         }
                     }
+                    
                 }
 
                 ScrollView {
                     VerticalBox {
-                        spacing: 0px;
+                        spacing: 2px;
                         for cfg[index] in root.configs : ServerItem {
                             flag: cfg.flag;
                             name: cfg.name;

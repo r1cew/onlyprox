@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout, Instant};
 
 #[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 
 pub fn get_free_port() -> u16 {
