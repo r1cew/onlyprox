@@ -7,7 +7,6 @@ use tokio::process::{Child, Command};
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-
 pub struct XrayService {
     child: Option<Child>,
     pub port: u16,
@@ -25,10 +24,7 @@ impl XrayService {
     }
 
     /// Генерирует и сохраняет JSON-конфиг во временный или постоянный файл
-    pub async fn write_config_to_file(
-        config: &XrayConfig,
-        target_path: &PathBuf,
-    ) -> Result<(), String> {
+    pub async fn write_config_to_file(config: &XrayConfig, target_path: &PathBuf) -> Result<(), String> {
         if let Some(parent) = target_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -59,7 +55,6 @@ impl XrayService {
         let mut cmd = Command::new(&xray);
         cmd.arg("run").arg("-c").arg(config_path);
 
-        
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -68,15 +63,13 @@ impl XrayService {
                 .stderr(std::process::Stdio::null());
         }
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Не удалось запустить xray: {}", e))?;
+        let child = cmd.spawn().map_err(|e| format!("Не удалось запустить xray: {}", e))?;
 
         self.child = Some(child);
         Ok(())
     }
 
-    /// Включает или выключает системный прокси 
+    /// Включает или выключает системный прокси
     pub fn set_system_proxy(&self, enable: bool) {
         if Sysproxy::is_support() {
             let sysprox = Sysproxy {
@@ -96,14 +89,21 @@ impl XrayService {
             let _ = child.kill().await;
         }
     }
+}
 
-    /// Дожидается завершения процесса Xray
-    pub async fn wait(&mut self) -> Option<std::process::ExitStatus> {
-        if let Some(mut child) = self.child.take() {
-            child.wait().await.ok()
-        } else {
-            None
-        }
+/// Убивает все "осиротевшие" процессы xray (например, после аварийного завершения приложения).
+pub async fn kill_stray_xray_processes() {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = tokio::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", "xray.exe"]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.output().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = tokio::process::Command::new("pkill").args(["-f", "bin/xray"]).output().await;
     }
 }
 
@@ -124,4 +124,3 @@ pub async fn save_working_configs(candidates: &[ProxyCandidate]) -> Result<PathB
 
     Ok(file_path)
 }
-

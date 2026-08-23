@@ -13,7 +13,6 @@ use tokio::time::{sleep, timeout, Instant};
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-
 pub fn get_free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
@@ -26,28 +25,18 @@ pub fn link_to_config(candidate: &ProxyCandidate, port: u16) -> XrayConfig {
     XrayConfig::new_with_proxy(outbound, port)
 }
 
-fn get_flag_emoji(country_code: &str) -> Option<String> {
-    if country_code.len() != 2 {
-        return None;
+/// Возвращает двухбуквенный код страны в верхнем регистре (например "DE"),
+/// если `country_code` похож на настоящий ISO-код. Раньше здесь собирался
+/// эмодзи-флаг (пара "regional indicator" символов), но такие эмодзи —
+/// это лигатура, а egui не делает шейпинг текста (нет HarfBuzz), поэтому
+/// вместо флага всегда рисовался прямоугольник. Показываем сам код страны
+/// текстом в цветном бейдже — это и работает везде, и выглядит аккуратно.
+fn extract_country_code(country_code: &str) -> Option<String> {
+    if country_code.len() == 2 && country_code.chars().all(|c| c.is_ascii_alphabetic()) {
+        Some(country_code.to_ascii_uppercase())
+    } else {
+        None
     }
-
-    let mut flag = String::new();
-
-    for ch in country_code.to_ascii_uppercase().chars() {
-        if ch.is_ascii_alphabetic() {
-            let code_point = ch as u32 + 127397;
-
-            if let Some(flag_char) = std::char::from_u32(code_point) {
-                flag.push(flag_char);
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        }
-    }
-    
-    Some(flag)
 }
 
 pub async fn check_country_flag(socks_port: u16, timeout_dur: Duration) -> Option<String> {
@@ -75,16 +64,15 @@ pub async fn check_country_flag(socks_port: u16, timeout_dur: Duration) -> Optio
         _ => return None,
     };
 
-    // Парсим формат key=value в HashMap
     let trace: HashMap<&str, &str> = text
         .lines()
         .filter_map(|line| line.split_once('='))
         .collect();
 
     let country = trace.get("loc").unwrap_or(&"XX");
-    let flag = get_flag_emoji(country)?;
+    let code = extract_country_code(country)?;
 
-    Some(flag)
+    Some(code)
 }
 
 pub async fn measure_speed_kbps(
@@ -156,15 +144,11 @@ pub async fn check_single_candidate(
     };
     let tmp = APP_DIR.join("tmp");
 
-    let temp_config_path = tmp
-        .join(format!("xray_check_{}_{}.json", candidate.id, test_socks_port));
-    
+    let temp_config_path = tmp.join(format!("xray_check_{}_{}.json", candidate.id, test_socks_port));
+
     let _ = tokio::fs::create_dir_all(&tmp).await;
 
-    if tokio::fs::write(&temp_config_path, config_json)
-        .await
-        .is_err()
-    {
+    if tokio::fs::write(&temp_config_path, config_json).await.is_err() {
         return CheckResult {
             is_working: false,
             latency_ms: 0,
@@ -172,7 +156,7 @@ pub async fn check_single_candidate(
             flag: String::new(),
         };
     }
-    
+
     #[cfg(target_os = "windows")]
     let xray = APP_DIR.join("bin").join("xray.exe");
     #[cfg(target_os = "linux")]
@@ -210,20 +194,18 @@ pub async fn check_single_candidate(
             };
         }
     };
-    
+
     sleep(Duration::from_millis(400)).await;
 
     let start_time = Instant::now();
     let flag_option = check_country_flag(test_socks_port, Duration::from_secs(5)).await;
     let latency_ms = start_time.elapsed().as_millis();
-    
-    // Используем флаг если получили, иначе - глобус
-    let flag = flag_option.clone().unwrap_or_else(|| "🌐".to_string());
+
+    let flag = flag_option.clone().unwrap_or_else(|| "—".to_string());
 
     let mut speed_kbps = 0.0;
     let mut is_working = false;
 
-    // Проверяем, удалось ли получить флаг (прокси ответил)
     if flag_option.is_some() {
         if need_speedtest {
             if let Some(speed) = measure_speed_kbps(test_socks_port, Duration::from_secs(6), min_speed_kbps).await {
@@ -249,6 +231,7 @@ pub async fn check_single_candidate(
 pub async fn run_pipeline(
     initial_links: Vec<ProxyLink>,
     stages: Vec<TestStage>,
+    progress: Option<Arc<dyn Fn(usize, usize, &str) + Send + Sync>>,
 ) -> Vec<ProxyCandidate> {
     let mut candidates: Vec<ProxyCandidate> = initial_links
         .into_iter()
@@ -262,27 +245,14 @@ pub async fn run_pipeline(
         })
         .collect();
 
-    println!("🚀 СТАРТ ВОРОНКИ ПРОВЕРКИ. Всего кандидатов: {}\n", candidates.len());
-
     for (stage_idx, stage) in stages.iter().enumerate() {
         if candidates.is_empty() {
-            println!("⚠️ Все конфиги отсеялись. Проверка завершена.");
             break;
         }
 
-        println!(
-            "==================================================\n\
-             🔹 ЭТАП {}/{}: {}\n\
-             На входе: {} | Потоков: {} | Повторов: {} | Мин.Скорость: {} КБ/с\n\
-             ==================================================",
-            stage_idx + 1,
-            stages.len(),
-            stage.name,
-            candidates.len(),
-            stage.threads,
-            stage.repeats,
-            stage.min_speed_kbps
-        );
+        if let Some(cb) = &progress {
+            cb(stage_idx, stages.len(), &stage.name);
+        }
 
         let semaphore = Arc::new(Semaphore::new(stage.threads));
         let mut tasks = vec![];
@@ -304,11 +274,7 @@ pub async fn run_pipeline(
                         sleep(Duration::from_secs(stage_info.interval_sec)).await;
                     }
 
-                    let res = check_single_candidate(
-                        &candidate, 
-                        stage_info.speedtest, 
-                        stage_info.min_speed_kbps
-                    ).await;
+                    let res = check_single_candidate(&candidate, stage_info.speedtest, stage_info.min_speed_kbps).await;
 
                     if !res.is_working || res.speed_kbps < stage_info.min_speed_kbps {
                         passed_all_repeats = false;
@@ -340,22 +306,12 @@ pub async fn run_pipeline(
         let mut next_stage_candidates = Vec::new();
         for task in tasks {
             if let Ok(Some(survived)) = task.await {
-                println!(
-                    "  [✓] [{}] {} | {} | {} ms | {:.1} KB/s",
-                    survived.id,
-                    survived.link.remark(),
-                    survived.flag,
-                    survived.last_latency,
-                    survived.last_speed_kbps
-                );
                 next_stage_candidates.push(survived);
             }
         }
 
         candidates = next_stage_candidates;
-        println!("\nВыжило на этапе '{}': {}\n", stage.name, candidates.len());
     }
 
-    println!("🎉 ВОРОНКА ЗАВЕРШЕНА! Итого отборных конфигов: {}", candidates.len());
     candidates
 }

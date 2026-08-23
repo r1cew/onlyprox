@@ -3,13 +3,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+/// Каталог, где лежит исполняемый файл. Используется как корень для
+/// config/, results/, bin/, tmp/.
 pub static APP_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 });
+
+// ---------------------------------------------------------------------
+// Xray-конфиг
+// ---------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XrayConfig {
@@ -63,6 +68,10 @@ impl XrayConfig {
     }
 }
 
+// ---------------------------------------------------------------------
+// Ссылки на прокси (vless/vmess/trojan/ss)
+// ---------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProxyLink {
     Vless(VlessData),
@@ -78,6 +87,18 @@ impl ProxyLink {
             ProxyLink::Vmess(d) => &d.remark,
             ProxyLink::Trojan(d) => &d.remark,
             ProxyLink::Shadowsocks(d) => &d.remark,
+        }
+    }
+
+    /// Ключ для дедупликации: протокол+адрес+порт+идентификатор.
+    /// Используется, чтобы одна и та же подписка/сервер не попадали в
+    /// список кандидатов дважды, даже если пришли из разных источников.
+    pub fn dedup_key(&self) -> String {
+        match self {
+            ProxyLink::Vless(d) => format!("vless:{}:{}:{}", d.address, d.port, d.uuid),
+            ProxyLink::Vmess(d) => format!("vmess:{}:{}:{}", d.address, d.port, d.uuid),
+            ProxyLink::Trojan(d) => format!("trojan:{}:{}:{}", d.address, d.port, d.password),
+            ProxyLink::Shadowsocks(d) => format!("ss:{}:{}:{}", d.address, d.port, d.password),
         }
     }
 }
@@ -123,6 +144,10 @@ pub struct SsData {
     pub remark: String,
 }
 
+// ---------------------------------------------------------------------
+// Пайплайн проверки
+// ---------------------------------------------------------------------
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestStage {
     pub name: String,
@@ -148,4 +173,71 @@ pub struct CheckResult {
     pub latency_ms: u128,
     pub speed_kbps: f64,
     pub flag: String,
+}
+
+// ---------------------------------------------------------------------
+// Источники конфигов: подписки (URL) + добавленные вручную ссылки
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    pub name: String,
+    pub url: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLink {
+    pub raw: String,
+    pub enabled: bool,
+    /// Заполняется при добавлении: понятное имя, чтобы показать в списке
+    /// источников ещё до прогона проверки.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourcesConfig {
+    pub subscriptions: Vec<Subscription>,
+    pub custom_links: Vec<CustomLink>,
+}
+
+impl Default for SourcesConfig {
+    fn default() -> Self {
+        Self {
+            subscriptions: vec![Subscription {
+                name: "Стандартная подписка (RU mobile)".to_string(),
+                url: "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt".to_string(),
+                enabled: true,
+            }],
+            custom_links: Vec::new(),
+        }
+    }
+}
+
+impl SourcesConfig {
+    pub fn config_path() -> PathBuf {
+        APP_DIR.join("config").join("sources.json")
+    }
+
+    pub async fn load() -> Self {
+        let path = Self::config_path();
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    pub async fn save(&self) -> Result<(), String> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Не удалось создать директорию config: {e}"))?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Ошибка сериализации sources.json: {e}"))?;
+        tokio::fs::write(&path, json)
+            .await
+            .map_err(|e| format!("Ошибка записи sources.json: {e}"))
+    }
 }

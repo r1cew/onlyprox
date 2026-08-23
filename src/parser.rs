@@ -111,11 +111,17 @@ fn parse_ss(link: &str) -> Result<SsData, Box<dyn std::error::Error>> {
 }
 
 fn decode_b64(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let cleaned = input.trim().replace("\r", "").replace("\n", "");
-    if let Ok(data) = URL_SAFE_NO_PAD.decode(&cleaned) { return Ok(data); }
-    if let Ok(data) = STANDARD.decode(&cleaned) { return Ok(data); }
+    let cleaned = input.trim().replace('\r', "").replace('\n', "");
+    if let Ok(data) = URL_SAFE_NO_PAD.decode(&cleaned) {
+        return Ok(data);
+    }
+    if let Ok(data) = STANDARD.decode(&cleaned) {
+        return Ok(data);
+    }
 
     let mut padded = cleaned;
-    while padded.len() % 4 != 0 { padded.push('='); }
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
     STANDARD.decode(&padded).map_err(|e| e.into())
 }
